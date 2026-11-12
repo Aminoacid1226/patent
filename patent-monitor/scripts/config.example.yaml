@@ -12,12 +12,8 @@
 mode: web   # api | web
 
 # ── 输出目录 ────────────────────────────────────────────────────────────────
-# 相对路径（相对于 run_monitor.py 所在目录） 或 绝对路径
-# 建议改成你希望存放监控产物的目录，例如：
-#   root: "D:\\Ythu\\Trae\\专利获取\\codex\\patent_monitor"
-#   root: "C:\\Users\\Public\\patent-monitor"
 output:
-  root: "patent_monitor_output"
+  root: "D:\\Ythu\\Trae\\专利获取\\codex\\patent_monitor"
   report_dir: "reports"          # Markdown 报告子目录
   patent_dir: "patents"         # 下载的 PDF/HTML 子目录（按靶点分文件夹）
   excel_file: "patent_summary.xlsx"
@@ -25,15 +21,27 @@ output:
   abbr_file: "applicant_abbr.json"
   records_file: "patent_records.json"
 
-# ── 靶点定义 ────────────────────────────────────────────────────────────────
-# 每个靶点包含：关键词、治疗用途限定、排除词、检索字段
+# ── 监控项定义（完全可自定义）────────────────────────────────────────────────
+# targets 下的每个 key 就是一个监控项，名称任意 —— 可以是药物靶点、技术主题、
+# 材料、公司名等任何你想监控专利的对象。Excel 工作表、报告分组都会自动跟随。
+#
+# 每个监控项包含：
+#   keywords:      检索式（OR 连接多个词，引号包裹短语）
+#   therapy_filter: 可选，检索结果收窄子句（pharma 模式用，generic 可留空或自定义）
+#   exclude_terms:  排除词列表（标题+摘要命中即剔除）
+#   screening:      筛选模式 pharma（创新药）/ generic（通用，默认）/ none（不过滤）
+#   description:    描述（仅用于人阅读）
+#   wipo_field:     WIPO 检索字段: TI=标题, AB=摘要, CL=权利要求, ALL=全字段
+#
+# 添加新监控项：直接加一个节点，然后 python run_monitor.py --full-rebuild
 targets:
   TSHR:
     keywords: 'TSHR OR "thyroid stimulating hormone receptor" OR thyrotropin'
     therapy_filter: 'AND (treatment OR therapeutic OR pharmaceutical OR drug OR antibody OR inhibitor OR agonist OR antagonist OR siRNA OR antisense OR "gene therapy")'
     exclude_terms: []
     description: "甲状腺刺激激素受体（甲状腺相关疾病）"
-    wipo_field: "ALL"    # WIPO 检索字段: TI=标题, AB=摘要, CL=权利要求, ALL=全字段
+    wipo_field: "ALL"
+    screening: pharma    # WIPO 检索字段: TI=标题, AB=摘要, CL=权利要求, ALL=全字段
 
   APJ:
     keywords: 'APJ OR APLNR OR "apelin receptor"'
@@ -44,6 +52,7 @@ targets:
       - "wireless"
     description: "Apelin receptor（心血管、代谢等）"
     wipo_field: "ALL"
+    screening: pharma
 
   PCSK9:
     keywords: 'PCSK9 OR "proprotein convertase subtilisin/kexin type 9"'
@@ -51,6 +60,7 @@ targets:
     exclude_terms: []
     description: "PCSK9 靶点（降脂、心血管）"
     wipo_field: "ALL"
+    screening: pharma
 
   CYP51:
     keywords: 'CYP51 OR "cytochrome P450 51" OR "sterol 14α-demethylase"'
@@ -62,6 +72,26 @@ targets:
       - "myelin"
     description: "真菌 CYP51 / sterol 14α-demethylase（抗真菌方向，排除人源 CYP51）"
     wipo_field: "ALL"
+    screening: pharma
+
+# ── 通用主题模板（取消注释即可监控任意非药物主题）────────────────────────────
+# 示例：监控固态电池专利（通用模式，不做药物筛选）
+#  固态电池:
+#    keywords: '"solid-state battery" OR "all-solid-state battery" OR "solid electrolyte"'
+#    therapy_filter: ''
+#    exclude_terms: []
+#    screening: generic
+#    description: "固态电池 / 固态电解质相关专利"
+#    wipo_field: "ALL"
+#
+# 示例：监控某公司的专利动向（none 模式，只检索不筛选）
+#  宁德时代:
+#    keywords: '"CATL" OR "Contemporary Amperex" OR "宁德时代"'
+#    therapy_filter: ''
+#    exclude_terms: []
+#    screening: none
+#    description: "宁德时代专利动向"
+#    wipo_field: "ALL"
 
 # ── API 模式配置（mode: api 时生效）──────────────────────────────────────────
 api:

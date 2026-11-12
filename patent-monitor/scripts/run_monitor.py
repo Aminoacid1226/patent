@@ -59,6 +59,7 @@ from screening import (
     cross_source_verify,
     screen_records,
     check_data_quality,
+    parse_keyword_hints,
 )
 from downloader import ApplicantAbbrManager, PatentDownloader
 from reporter import generate_markdown_report, ExcelWriter
@@ -154,10 +155,20 @@ class PatentMonitor:
         return RunState()
 
     def _load_records(self) -> dict[str, list[dict[str, Any]]]:
+        from models import LEGACY_COL_MAP
         if self.records_path.exists():
             try:
                 with self.records_path.open("r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                # 旧版列名兼容映射
+                for t, rows in data.items():
+                    if isinstance(rows, list):
+                        data[t] = [
+                            {LEGACY_COL_MAP.get(k, k): v for k, v in row.items()}
+                            if isinstance(row, dict) else row
+                            for row in rows
+                        ]
+                return data
             except Exception:
                 pass
         return {t: [] for t in self.cfg.get("targets", {})}
@@ -305,7 +316,7 @@ class PatentMonitor:
             return 0
 
         targets = self._get_targets()
-        self.logger.info(f"监控靶点: {list(targets.keys())}")
+        self.logger.info(f"监控项: {list(targets.keys())}")
 
         # 2. 检索
         retrievers = self._create_retrievers()
@@ -321,15 +332,28 @@ class PatentMonitor:
 
         # 多源交叉验证
         if self.cfg.get("audit", {}).get("cross_source_verify", True):
+            all_cfg_targets = self.cfg.get("targets", {})
+            hints_by_target = {
+                t: parse_keyword_hints(tcfg.get("keywords", ""))
+                for t, tcfg in all_cfg_targets.items()
+            }
             for target in targets:
                 tgt_results = [r for r in all_results if r.target == target]
-                cs_report = cross_source_verify(tgt_results, self.cfg.get("audit", {}))
+                cs_report = cross_source_verify(
+                    tgt_results, self.cfg.get("audit", {}), hints_by_target
+                )
                 audit_issues.extend(cs_report.issues)
 
-        # 各靶点独立筛选
+        # 各监控项独立筛选（模式由配置决定：pharma / generic / none）
         for target, recs in merged.items():
-            exclude_terms = targets.get(target, {}).get("exclude_terms", [])
-            passed, issues = screen_records(recs, target, exclude_terms)
+            tgt_cfg = targets.get(target, {})
+            passed, issues = screen_records(
+                recs,
+                target,
+                keywords=tgt_cfg.get("keywords", ""),
+                exclude_terms=tgt_cfg.get("exclude_terms", []),
+                mode=tgt_cfg.get("screening", "generic"),
+            )
             screened[target] = passed
             audit_issues.extend(issues)
 
@@ -413,8 +437,8 @@ class PatentMonitor:
 
         self._save_records()
 
-        # Excel 全量重建（records.json 是事实源）
-        excel_writer = ExcelWriter(self.excel_path)
+        # Excel 全量重建（records.json 是事实源；工作表 = 监控项，动态）
+        excel_writer = ExcelWriter(self.excel_path, targets=list(self.cfg.get("targets", {}).keys()))
         counts = excel_writer.rebuild_all(self._existing_records)
         self.logger.info(
             f"Excel 已重建: "

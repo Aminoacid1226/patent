@@ -18,7 +18,8 @@ from typing import Any, Literal, Optional
 Mode = Literal["api", "web"]
 RunType = Literal["initial", "update", "skip", "rebuild"]
 Source = Literal["wipo", "google", "espacenet", "uspto", "patenthub", "zhihuia"]
-TargetName = Literal["TSHR", "APJ", "PCSK9", "CYP51"]
+# 监控项（target）不限于任何预设名单 —— 完全由 config.yaml 的 targets 节定义，
+# 可以是药物靶点、技术主题、材料、公司等任意监控对象。
 
 COLS = [
     "收录日期",
@@ -26,13 +27,19 @@ COLS = [
     "专利号",
     "标题",
     "申请人",
-    "技术方向",
-    "用途/适应症",
+    "主题方向",
+    "应用说明",
     "法律状态（如有）",
     "摘要要点",
     "本地文件路径",
     "报告来源",
 ]
+
+# 旧版 records.json 列名 → 新列名（读取旧数据时自动映射）
+LEGACY_COL_MAP = {
+    "技术方向": "主题方向",
+    "用途/适应症": "应用说明",
+}
 
 
 # ============================================================================
@@ -75,8 +82,8 @@ class PatentRecord:
             "专利号": normalize_pub_no(self.publication_number),
             "标题": self.title_zh or self.title,
             "申请人": self.applicant,
-            "技术方向": self.tech_direction,
-            "用途/适应症": self.indication,
+            "主题方向": self.tech_direction,
+            "应用说明": self.indication,
             "法律状态（如有）": self.legal_status,
             "摘要要点": self.abstract[:500] if self.abstract else "",
             "本地文件路径": self.local_path,

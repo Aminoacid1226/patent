@@ -4,8 +4,8 @@ Markdown 报告 + Excel 汇总生成器
 Markdown 报告结构：
   - 执行类型 + 检索窗口
   - 变更日志（简要表格）
-  - 靶点摘要
-  - 各专利详情（按靶点分组）
+  - 监控项摘要
+  - 各专利详情（按监控项分组）
   - 自我审查发现
   - 趋势总评
   - 附录：下载文件清单 + 参考来源
@@ -47,7 +47,7 @@ def generate_markdown_report(
     lines: list[str] = []
 
     # 标题
-    lines.append(f"# 靶点专利监控报告 ({current_date})")
+    lines.append(f"# 专利监控报告 ({current_date})")
     lines.append("")
     lines.append(f"**执行类型**：{run_type}")
     lines.append("")
@@ -71,7 +71,7 @@ def generate_markdown_report(
         if run_type == "全量初建":
             lines.append(f"> 全量初建：累计收录 **{total}** 件专利")
             lines.append("")
-        lines.append("| 靶点 | 本次新增专利号 |")
+        lines.append("| 监控项 | 本次新增专利号 |")
         lines.append("|---|---|")
         for target, rows in all_new.items():
             if rows:
@@ -84,10 +84,10 @@ def generate_markdown_report(
         lines.append("> **本次无新增专利**")
         lines.append("")
 
-    # ── 靶点摘要 ──────────────────────────────────────────────────
-    lines.append("## 靶点摘要")
+    # ── 监控项摘要 ──────────────────────────────────────────────────
+    lines.append("## 监控项摘要")
     lines.append("")
-    lines.append("| 靶点 | 本次新增 | 技术方向分布 |")
+    lines.append("| 监控项 | 本次新增 | 技术方向分布 |")
     lines.append("|---|---:|---|")
     for target, rows in all_new.items():
         direction_dist = _count_distribution([r.tech_direction for r in rows])
@@ -143,13 +143,13 @@ def generate_markdown_report(
     if total > 0:
         lines.append(_generate_trend_comment(all_new))
     else:
-        lines.append("本次未发现新的靶点相关专利公开。")
+        lines.append("本次未发现新的监控项相关专利公开。")
     lines.append("")
 
     # ── 附录：下载文件 ──────────────────────────────────────────────
     lines.append("## 附录：下载文件清单及有效性")
     lines.append("")
-    lines.append("| 靶点 | 专利号 | 本地文件 | 状态 |")
+    lines.append("| 监控项 | 专利号 | 本地文件 | 状态 |")
     lines.append("|---|---|---|---|")
     file_entries = 0
     for target, rows in all_new.items():
@@ -223,32 +223,40 @@ class ExcelWriter:
     这样不会丢失旧行，天然支持去重。
     """
 
-    TARGETS = ["TSHR", "APJ", "PCSK9", "CYP51"]
+    # 工作表 = 监控项名称，完全由 config.yaml 的 targets 节决定（动态）
 
-    def __init__(self, xlsx_path: Path):
+    def __init__(self, xlsx_path: Path, targets: list[str] | None = None):
         self.xlsx_path = xlsx_path
+        self.targets = targets  # None 时由 rebuild_all 从 records 的 key 推断
 
     def rebuild_all(self, records: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
         """
         全量重建 Excel 工作簿。
-        
+
         Args:
             records: {target: [row_dict, ...]} 每条 dict 的 key 对应 COLS
-            
+
         Returns:
             每个 target 的记录数
         """
+        # 工作表清单：优先用传入的 targets（配置顺序），否则用 records 的 key
+        sheet_names = self.targets or sorted(records.keys())
+        # 合并 records 中有数据但不在配置里的 key（防御性）
+        for k in records:
+            if k not in sheet_names:
+                sheet_names.append(k)
+
         self.xlsx_path.parent.mkdir(parents=True, exist_ok=True)
         counts: dict[str, int] = {}
 
         with zipfile.ZipFile(self.xlsx_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("[Content_Types].xml", _content_types_xml(len(self.TARGETS)))
+            zf.writestr("[Content_Types].xml", _content_types_xml(len(sheet_names)))
             zf.writestr("_rels/.rels", _rels_xml())
-            zf.writestr("xl/workbook.xml", _workbook_xml(self.TARGETS))
-            zf.writestr("xl/_rels/workbook.xml.rels", _workbook_rels_xml(len(self.TARGETS)))
+            zf.writestr("xl/workbook.xml", _workbook_xml(sheet_names))
+            zf.writestr("xl/_rels/workbook.xml.rels", _workbook_rels_xml(len(sheet_names)))
             zf.writestr("xl/styles.xml", _styles_xml())
 
-            for idx, target in enumerate(self.TARGETS, start=1):
+            for idx, target in enumerate(sheet_names, start=1):
                 rows = [COLS]
                 target_rows = records.get(target, [])
                 seen_keys: set[tuple[str, str]] = set()

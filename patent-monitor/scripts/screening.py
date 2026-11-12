@@ -1,16 +1,19 @@
 """
-创新药专利筛选 + 自我审查模块
+专利筛选 + 自我审查模块（通用版）
 
-筛选逻辑：
-  1. 规则匹配 —— 保留药物/治疗相关，剔除诊断/器械/农用
-  2. 关键词覆盖度检查 —— 验证标题+摘要是否确实包含靶点关键词
-  3. 排除词过滤 —— 如 CYP51 排除髓鞘再生、APJ 排除通信 Access Point
+监控项完全由配置驱动，可监控任意主题（药物靶点、技术方向、材料、公司等）。
+
+筛选模式（config.yaml → targets.<名称>.screening）：
+  pharma  — 创新药模式：保留药物/治疗相关，剔除诊断/器械/农用，
+            并推断技术方向与应用说明（适用于药物靶点监控）
+  generic — 通用模式：仅做排除词过滤 + 关键词覆盖度检查（默认，适用于任何主题）
+  none    — 不过滤：只做排除词过滤，其余全部保留
 
 自我审查（Audit）：
   - 多源交叉验证：某源结果数异常偏少则告警
-  - 关键词覆盖率：标题+摘要未含关键词的比例
+  - 关键词覆盖率：标题+摘要未含关键词的比例（关键词自动从检索式解析）
   - 数据缺失率：关键字段（标题、申请人、日期）为空的比例
-  - 去重完整性：公开号标准化后检查同族重复
+  - 排除词过滤：每监控项可单独配置 exclude_terms
 """
 from __future__ import annotations
 
@@ -22,7 +25,53 @@ from models import AuditIssue, PatentRecord, SearchResult
 
 
 # ============================================================================
-# 创新药筛选规则
+# 关键词提示解析（从检索式自动提取，无需硬编码）
+# ============================================================================
+
+def parse_keyword_hints(keywords: str) -> list[str]:
+    """
+    从检索式中提取关键词提示，用于覆盖度检查。
+
+    示例：
+      'TSHR OR "thyroid stimulating hormone receptor" OR thyrotropin'
+        → ['tshr', 'thyroid stimulating hormone receptor', 'thyrotropin']
+      '"solid-state battery" OR "all-solid-state"'
+        → ['solid-state battery', 'all-solid-state']
+
+    规则：
+      - 引号内短语整体作为一个提示
+      - 其余按 OR / AND / 括号切分，长度 >= 3 的 token 保留
+    """
+    if not keywords:
+        return []
+
+    hints: list[str] = []
+
+    # 先拆出引号短语
+    parts = re.split(r'"([^"]+)"', keywords)
+    quoted = [p.strip().lower() for p in parts[1::2] if p.strip()]
+    rest = " ".join(parts[0::2])
+
+    # 剩余部分按 OR/AND/括号切分
+    for tok in re.split(r"\bOR\b|\bAND\b|\(|\)", rest, flags=re.I):
+        tok = tok.strip().strip("'").strip()
+        if tok and len(tok) >= 3:
+            hints.append(tok.lower())
+
+    hints.extend(quoted)
+
+    # 去重保序
+    seen: set[str] = set()
+    out: list[str] = []
+    for h in hints:
+        if h not in seen:
+            seen.add(h)
+            out.append(h)
+    return out
+
+
+# ============================================================================
+# pharma 模式专用规则（创新药筛选）
 # ============================================================================
 
 # 命中 → 判定为创新药相关
@@ -48,11 +97,6 @@ DROP_RE = re.compile(
     re.I,
 )
 
-
-# ============================================================================
-# 技术方向判定
-# ============================================================================
-
 DIRECTION_MAP: dict[str, str] = {
     "antibody": "抗体/蛋白药",
     "siRNA": "核酸药物/siRNA",
@@ -68,12 +112,11 @@ DIRECTION_MAP: dict[str, str] = {
     "inverse agonist": "小分子反向激动剂",
     "modulator": "小分子调节剂",
     "antifungal": "抗真菌药",
-    "azoe": "唑类抗真菌",
 }
 
 
 def infer_direction(blob: str) -> str:
-    """从文本推断技术方向"""
+    """从文本推断技术方向（pharma 模式）"""
     lower = blob.lower()
     for key, label in DIRECTION_MAP.items():
         if key in lower:
@@ -84,7 +127,7 @@ def infer_direction(blob: str) -> str:
 
 
 def infer_indication(blob: str) -> str:
-    """从文本推断用途/适应症"""
+    """从文本推断用途/适应症（pharma 模式）"""
     patterns = [
         r"treat(?:ing|ment)? of ([^.；;\n]{3,150})",
         r"for ([^.；;\n]{3,150})",
@@ -95,7 +138,6 @@ def infer_indication(blob: str) -> str:
         m = re.search(pattern, blob, re.I)
         if m:
             text = m.group(1).strip()
-            # 去除尾部连接词
             text = re.split(r"[,;.;\s]+and\s+", text)[0].strip()
             if 3 <= len(text) <= 150:
                 return text
@@ -109,11 +151,20 @@ def infer_indication(blob: str) -> str:
 def screen_records(
     records: list[PatentRecord],
     target: str,
+    keywords: str = "",
     exclude_terms: list[str] | None = None,
+    mode: str = "generic",
 ) -> tuple[list[PatentRecord], list[AuditIssue]]:
     """
-    对检索到的专利记录执行创新药筛选 + 关键词覆盖检查。
-    
+    对检索到的专利记录执行筛选 + 关键词覆盖检查。
+
+    Args:
+        records:      待筛选记录
+        target:       监控项名称（任意主题）
+        keywords:     检索式（用于自动解析关键词提示，做覆盖度检查）
+        exclude_terms: 排除词列表（命中即剔除）
+        mode:         pharma / generic / none
+
     Returns:
         (筛选后的记录列表, 审查发现的问题列表)
     """
@@ -121,16 +172,14 @@ def screen_records(
     passed: list[PatentRecord] = []
     excluded_count = 0
     keyword_miss_count = 0
-    invalid_count = 0
 
-    # 靶点关键词（简化：从 PatentRecord 内部字段读取，或用 target 名称兜底）
-    target_keyword_hints = _get_target_keyword_hints(target)
+    hints = parse_keyword_hints(keywords)
 
     for rec in records:
         blob = f"{rec.title} {rec.abstract}"
         blob_lower = blob.lower()
 
-        # Step 1: 排除词过滤
+        # Step 1: 排除词过滤（所有模式都生效）
         if exclude_terms:
             matched_exclude = [t for t in exclude_terms if t.lower() in blob_lower]
             if matched_exclude:
@@ -139,69 +188,61 @@ def screen_records(
                     severity="WARNING",
                     category="排除词过滤",
                     message=f"专利 {rec.publication_number} 命中排除词: {matched_exclude}",
-                    details=f"靶点 {target}，申请人 {rec.applicant}",
+                    details=f"监控项 {target}，申请人 {rec.applicant}",
                 ))
                 continue
 
-        # Step 2: 关键词覆盖检查（是否包含靶点关键词）
-        has_keyword = any(hint.lower() in blob_lower for hint in target_keyword_hints)
-        if not has_keyword:
-            keyword_miss_count += 1
-            issues.append(AuditIssue(
-                severity="WARNING",
-                category="关键词覆盖度",
-                message=f"专利 {rec.publication_number} 标题+摘要未包含靶点关键词",
-                details=f"靶点 {target}，标题: {rec.title[:80]}...",
-            ))
-            # 不直接剔除，降低置信度但保留
-            rec._confidence = 0.3
-            rec._raw_keywords = ["无关键词匹配 - 存疑"]
+        # Step 2: 关键词覆盖检查（none 模式跳过）
+        if mode != "none" and hints:
+            has_keyword = any(h in blob_lower for h in hints)
+            if not has_keyword:
+                keyword_miss_count += 1
+                issues.append(AuditIssue(
+                    severity="WARNING",
+                    category="关键词覆盖度",
+                    message=f"专利 {rec.publication_number} 标题+摘要未包含检索关键词",
+                    details=f"监控项 {target}，标题: {rec.title[:80]}...",
+                ))
+                # 不直接剔除，降低置信度但保留
+                rec._confidence = 0.3
+                rec._raw_keywords = ["无关键词匹配 - 存疑"]
 
-        # Step 3: 创新药判定
-        is_keep = KEEP_RE.search(blob) is not None
-        is_drop = DROP_RE.search(blob) is not None
+        # Step 3: 按模式分类
+        if mode == "pharma":
+            is_keep = KEEP_RE.search(blob) is not None
+            is_drop = DROP_RE.search(blob) is not None
 
-        if is_drop and not is_keep:
-            # 明确应剔除
-            excluded_count += 1
-            continue
+            if is_drop and not is_keep:
+                excluded_count += 1
+                continue
 
-        if not is_keep and not is_drop:
-            # 既没命中保留也没命中剔除 → 存疑，保留但降低置信度
-            rec._confidence = min(rec._confidence, 0.5)
-            rec.tech_direction = "存疑（无治疗关键词匹配）"
-            rec.indication = "待人工复核"
+            if not is_keep and not is_drop:
+                rec._confidence = min(rec._confidence, 0.5)
+                rec.tech_direction = "存疑（无治疗关键词匹配）"
+                rec.indication = "待人工复核"
+            else:
+                rec.is_innovation_drug = True
+                rec.tech_direction = infer_direction(blob)
+                rec.indication = infer_indication(blob)
         else:
-            rec.is_innovation_drug = True
-            rec.tech_direction = infer_direction(blob)
-            rec.indication = infer_indication(blob)
+            # generic / none：不做药物判定，方向留给人工或后续 LLM 分析
+            rec.tech_direction = rec.tech_direction if rec.tech_direction != "未分类" else "未分类"
 
         passed.append(rec)
 
     # 汇总统计问题
     total = len(records)
-    if total > 0:
+    if total > 0 and mode != "none" and hints:
         keyword_miss_ratio = keyword_miss_count / total
         if keyword_miss_ratio > 0.2:
             issues.append(AuditIssue(
                 severity="ERROR" if keyword_miss_ratio > 0.5 else "WARNING",
                 category="关键词覆盖度",
-                message=f"靶点 {target} 有 {keyword_miss_count}/{total} 条记录未命中关键词（{keyword_miss_ratio:.0%}）",
+                message=f"监控项 {target} 有 {keyword_miss_count}/{total} 条记录未命中关键词（{keyword_miss_ratio:.0%}）",
                 details="可能是检索式过宽或检索源质量问题，建议人工复核",
             ))
 
     return passed, issues
-
-
-def _get_target_keyword_hints(target: str) -> list[str]:
-    """获取靶点的关键词提示列表（用于覆盖度检查）"""
-    hints = {
-        "TSHR": ["tshr", "thyroid stimulating hormone receptor", "thyrotropin receptor"],
-        "APJ": ["apj", "aplnr", "apelin receptor"],
-        "PCSK9": ["pcsk9", "proprotein convertase subtilisin", "kexin type 9"],
-        "CYP51": ["cyp51", "cytochrome p450 51", "sterol 14", "14α-demethylase", "14-alpha-demethylase", "lanosterol"],
-    }
-    return hints.get(target, [target.lower()])
 
 
 # ============================================================================
@@ -220,10 +261,11 @@ class CrossSourceReport:
 def cross_source_verify(
     results: list[SearchResult],
     audit_cfg: dict[str, Any],
+    hints_by_target: dict[str, list[str]] | None = None,
 ) -> CrossSourceReport:
     """
     多源交叉验证
-    
+
     检查：
       - 各源结果数量分布是否合理
       - 主源结果过少可能意味着检索异常
@@ -235,6 +277,7 @@ def cross_source_verify(
 
     min_ratio = audit_cfg.get("min_source_ratio", 0.3)
     coverage_threshold = audit_cfg.get("min_keyword_coverage", 0.8)
+    hints_by_target = hints_by_target or {}
 
     # 统计各源数量
     source_counts: dict[str, int] = {}
@@ -258,7 +301,7 @@ def cross_source_verify(
                 severity="WARNING",
                 category="多源交叉验证",
                 message=f"源 {source} 返回 0 条结果，主源 {primary[0]} 返回 {primary[1]} 条",
-                details=f"可能是检索异常或源本身无数据",
+                details="可能是检索异常或源本身无数据",
             ))
         elif ratio < min_ratio:
             report.issues.append(AuditIssue(
@@ -269,16 +312,14 @@ def cross_source_verify(
             ))
 
     # 关键词覆盖率检查
-    keyword_hints_cache: dict[str, list[str]] = {}
     for result in results:
-        hints = _get_target_keyword_hints(result.target)
-        keyword_hints_cache[result.target] = hints
-        if not result.records:
+        hints = hints_by_target.get(result.target)
+        if not hints or not result.records:
             continue
         miss = 0
         for rec in result.records:
             blob = f"{rec.title} {rec.abstract}".lower()
-            if not any(h.lower() in blob for h in hints):
+            if not any(h in blob for h in hints):
                 miss += 1
         coverage = 1 - miss / len(result.records)
         if coverage < coverage_threshold:
@@ -299,7 +340,7 @@ def cross_source_verify(
 def check_data_quality(records: list[PatentRecord], audit_cfg: dict[str, Any]) -> list[AuditIssue]:
     """
     数据完整性检查
-    
+
     - 关键字段（标题、申请人、公开日期）为空的比例
     - 公开号格式异常
     """
@@ -314,13 +355,13 @@ def check_data_quality(records: list[PatentRecord], audit_cfg: dict[str, Any]) -
     null_applicant = sum(1 for r in records if not r.applicant.strip())
     null_date = sum(1 for r in records if not r.publication_date.strip())
 
-    for field, null_count in [("标题", null_title), ("申请人", null_applicant), ("公开日期", null_date)]:
+    for field_name, null_count in [("标题", null_title), ("申请人", null_applicant), ("公开日期", null_date)]:
         ratio = null_count / total
         if ratio > max_null:
             issues.append(AuditIssue(
                 severity="WARNING",
                 category="数据完整性",
-                message=f"{field} 为空的比例 {ratio:.0%}（{null_count}/{total}）",
+                message=f"{field_name} 为空的比例 {ratio:.0%}（{null_count}/{total}）",
                 details=f"超过阈值 {max_null:.0%}",
             ))
 
@@ -328,7 +369,7 @@ def check_data_quality(records: list[PatentRecord], audit_cfg: dict[str, Any]) -
     bad_format = []
     for r in records:
         pub = r.publication_number
-        if not re.match(r'^[A-Z]{2}\d+[A-Z]?\d*$', pub):
+        if not re.match(r"^[A-Z]{2}\d+[A-Z]?\d*$", pub):
             bad_format.append(pub)
     if bad_format:
         issues.append(AuditIssue(
