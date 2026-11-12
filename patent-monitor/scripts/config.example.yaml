@@ -1,0 +1,174 @@
+# ============================================================================
+# 专利检索流程 —— 双模式配置中心
+# ============================================================================
+# 使用方式：复制本文件为 config.yaml 后修改（config.yaml 已加入 .gitignore）
+#
+# 模式说明：
+#   mode: api    → 使用商业专利数据库 API（需要 api 配置节）
+#   mode: web    → 使用免费公开源（WIPO / Google Patents / Espacenet / USPTO）
+# ============================================================================
+
+# ── 运行模式 ────────────────────────────────────────────────────────────────
+mode: web   # api | web
+
+# ── 输出目录 ────────────────────────────────────────────────────────────────
+# 相对路径（相对于 run_monitor.py 所在目录） 或 绝对路径
+# 建议改成你希望存放监控产物的目录，例如：
+#   root: "D:\\Ythu\\Trae\\专利获取\\codex\\patent_monitor"
+#   root: "C:\\Users\\Public\\patent-monitor"
+output:
+  root: "patent_monitor_output"
+  report_dir: "reports"          # Markdown 报告子目录
+  patent_dir: "patents"         # 下载的 PDF/HTML 子目录（按靶点分文件夹）
+  excel_file: "patent_summary.xlsx"
+  state_file: "task_state.json"
+  abbr_file: "applicant_abbr.json"
+  records_file: "patent_records.json"
+
+# ── 靶点定义 ────────────────────────────────────────────────────────────────
+# 每个靶点包含：关键词、治疗用途限定、排除词、检索字段
+targets:
+  TSHR:
+    keywords: 'TSHR OR "thyroid stimulating hormone receptor" OR thyrotropin'
+    therapy_filter: 'AND (treatment OR therapeutic OR pharmaceutical OR drug OR antibody OR inhibitor OR agonist OR antagonist OR siRNA OR antisense OR "gene therapy")'
+    exclude_terms: []
+    description: "甲状腺刺激激素受体（甲状腺相关疾病）"
+    wipo_field: "ALL"    # WIPO 检索字段: TI=标题, AB=摘要, CL=权利要求, ALL=全字段
+
+  APJ:
+    keywords: 'APJ OR APLNR OR "apelin receptor"'
+    therapy_filter: 'AND (treatment OR therapeutic OR pharmaceutical OR drug OR antibody OR inhibitor OR agonist OR antagonist OR siRNA OR antisense OR "gene therapy")'
+    exclude_terms:
+      - "access point"
+      - "wifi"
+      - "wireless"
+    description: "Apelin receptor（心血管、代谢等）"
+    wipo_field: "ALL"
+
+  PCSK9:
+    keywords: 'PCSK9 OR "proprotein convertase subtilisin/kexin type 9"'
+    therapy_filter: 'AND (treatment OR therapeutic OR pharmaceutical OR drug OR antibody OR inhibitor OR agonist OR antagonist OR siRNA OR antisense OR "gene therapy")'
+    exclude_terms: []
+    description: "PCSK9 靶点（降脂、心血管）"
+    wipo_field: "ALL"
+
+  CYP51:
+    keywords: 'CYP51 OR "cytochrome P450 51" OR "sterol 14α-demethylase"'
+    therapy_filter: 'AND (treatment OR therapeutic OR pharmaceutical OR drug OR antibody OR inhibitor OR agonist OR antagonist OR siRNA OR antisense OR "gene therapy")'
+    exclude_terms:
+      - "remyelination"
+      - "multiple sclerosis"
+      - "demyelination"
+      - "myelin"
+    description: "真菌 CYP51 / sterol 14α-demethylase（抗真菌方向，排除人源 CYP51）"
+    wipo_field: "ALL"
+
+# ── API 模式配置（mode: api 时生效）──────────────────────────────────────────
+api:
+  # 供应商选择
+  provider: "patenthub"   # patenthub | zhihuia | incoPat | derivwent
+
+  # PatentHub (http://www.patenthub.cn)
+  patenthub:
+    base_url: "https://api.patenthub.cn"
+    # 鉴权方式二选一：
+    #   header → 放在请求头 X-API-Key: <token>
+    #   param  → 放在 URL 查询参数 ?t=<token>
+    auth_type: "param"
+    api_key: "YOUR_API_KEY_HERE"
+    timeout: 60
+    max_retries: 3
+
+  # 智慧芽 (https://www.zhihuia.com)
+  zhihuia:
+    base_url: "https://api.zhihuia.com/v2"
+    auth_type: "header"
+    header_name: "X-Access-Token"
+    api_key: "YOUR_API_KEY_HERE"
+    timeout: 60
+    max_retries: 3
+
+  # incoPat
+  incoPat:
+    base_url: "https://api.incopat.com/openapi"
+    auth_type: "header"
+    header_name: "Authorization"
+    api_key: "Bearer YOUR_TOKEN_HERE"
+    timeout: 60
+    max_retries: 3
+
+# ── Web 模式配置（mode: web 时生效）──────────────────────────────────────────
+web:
+  # 检索源优先级列表（顺序决定 fallback 顺序）
+  sources:
+    - wipo       # WIPO PATENTSCOPE（主源，覆盖 WO + 多国）
+    - google      # Google Patents（补充 US/EP/CN）
+    - espacenet   # EPO Espacenet（补充 EP）
+    - uspto       # USPTO（补充 US）
+
+  # 请求配置
+  http:
+    timeout: 90
+    max_retries: 3
+    retry_interval: 30      # 秒，重试间隔
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+  # 验证码处理（WIPO 有时会弹出图片验证码）
+  captcha:
+    # auto → 自动识别（需要 vision API）
+    # manual → 暂停等待人工介入
+    # skip → 遇到验证码直接跳过该源
+    strategy: "manual"
+    # 自动识别配置（strategy=auto 时需要）
+    vision_api:
+      provider: "qwen2-vl"
+      api_key: "YOUR_VISION_API_KEY_HERE"
+      endpoint: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+      timeout: 120
+
+  # 浏览器配置（用于 JS 渲染和复杂页面）
+  browser:
+    enabled: false
+    # chrome → 使用本地 Chrome 扩展（Trae chrome 插件）
+    # playwright → 使用 Playwright（需安装）
+    backend: "chrome"
+
+# ── 执行策略 ────────────────────────────────────────────────────────────────
+execution:
+  # 执行频率（定时任务用）
+  schedule:
+    type: "weekly"          # daily | weekly | manual
+    weekday: 1              # 周几执行（1=周一）
+    hour: 8
+    minute: 0
+
+  # 全量 / 增量逻辑
+  full_rebuild: false       # true = 忽略 state，强制全量重建
+  # 增量窗口：从 last_date + 1天 到今天
+  # 全量窗口：无起始日期限制
+
+  # 并发控制
+  concurrency:
+    search_workers: 2       # 检索时的并发源数
+    download_workers: 4     # 下载时的并发数
+
+# ── 自我审查配置 ────────────────────────────────────────────────────────────
+audit:
+  # 多源交叉验证
+  cross_source_verify: true
+  # 最低命中比例（某源结果数 / 主源结果数 < 此值 则告警）
+  min_source_ratio: 0.3
+  # 关键词覆盖率检查（标题+摘要中必须包含关键词的比例）
+  min_keyword_coverage: 0.8
+  # 数据缺失容忍度（关键字段为空的比例上限）
+  max_null_ratio: 0.05
+  # PDF 强制校验（文件头必须是 %PDF）
+  force_pdf_header_check: true
+  # 同族专利去重
+  dedup_family: true
+
+# ── 日志 ────────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"             # DEBUG | INFO | WARNING | ERROR
+  file: "run.log"           # 留空则只输出到控制台
+  encoding: "utf-8"

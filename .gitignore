@@ -1,0 +1,20 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行时产物
+patent-monitor/scripts/config.yaml
+patent-monitor/scripts/run.log
+patent_monitor_output/
+patent-monitor_output/
+task_state.json
+patent_records.json
+applicant_abbr.json
+patent_summary.xlsx
+patents/
+reports/
+
+# 系统
+.DS_Store
+Thumbs.db
